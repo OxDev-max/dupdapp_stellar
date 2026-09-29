@@ -106,7 +106,10 @@ impl MultisigAdminContract {
 
         let mut next_id: u64 = env.storage().instance().get(&DataKey::NextProposalId).unwrap_or(0);
         let proposal_id = next_id;
-        next_id = next_id.saturating_add(1);
+        // Use checked arithmetic so that exhausting the u64 id space fails
+        // loudly instead of silently reusing an id (which would overwrite an
+        // existing stored Proposal at the same key).
+        next_id = next_id.checked_add(1).expect("proposal id overflow");
         env.storage().instance().set(&DataKey::NextProposalId, &next_id);
 
         let now = env.ledger().timestamp();
@@ -239,35 +242,28 @@ impl MultisigAdminContract {
         false
     }
 
-    fn has_approved(approvals: &Vec<Address>, caller: &Address) -> bool {
-        Self::contains_address(approvals, caller)
+    fn has_approved(approvals: &Vec<Address>, addr: &Address) -> bool {
+        Self::contains_address(approvals, addr)
     }
 
-    /// Marks a proposal as executed once it has reached [`THRESHOLD`] approvals.
-    ///
-    /// This is a **signaling-only** operation: it sets `proposal.executed = true`
-    /// and emits a `proposal_executed` event. The proposal's `operation` and
-    /// `args` fields are NOT interpreted or dispatched here — no cross-contract
-    /// call is made and no external state is mutated. An off-chain relayer is
-    /// expected to observe the `proposal_executed` event and apply the real
-    /// effect of `operation`/`args` itself.
     fn maybe_execute(env: &Env, proposal: &mut Proposal) {
         if proposal.executed {
             return;
         }
+        if proposal.approvals.len() < THRESHOLD {
+            return;
+        }
         if env.ledger().timestamp() > proposal.expires_at {
-            panic!("proposal expired");
+            return;
         }
-        // THRESHOLD must remain >= 2 (see the invariant on the constant).
-        if proposal.approvals.len() >= THRESHOLD {
-            proposal.executed = true;
-            env.events().publish(
-                ("MULTISIG", "proposal_executed"),
-                ProposalExecutedEvent {
-                    proposal_id: proposal.id,
-                    operation: proposal.operation.clone(),
-                },
-            );
-        }
+
+        proposal.executed = true;
+        env.events().publish(
+            ("MULTISIG", "proposal_executed"),
+            ProposalExecutedEvent {
+                proposal_id: proposal.id,
+                operation: proposal.operation.clone(),
+            },
+        );
     }
 }
