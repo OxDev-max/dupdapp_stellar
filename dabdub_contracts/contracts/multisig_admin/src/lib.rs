@@ -4,6 +4,15 @@ mod test;
 
 use soroban_sdk::{contract, contractimpl, contracttype, vec, Address, Bytes, Env, String, Vec};
 
+/// Minimum number of approvals required before a proposal auto-executes.
+///
+/// SECURITY INVARIANT: `THRESHOLD` must NEVER be less than 2. Both `propose`
+/// and `approve` call `maybe_execute`, which auto-executes as soon as
+/// `proposal.approvals.len() >= THRESHOLD`. A fresh proposal already carries a
+/// single approval (the proposer), so a threshold of 1 would let a lone proposer
+/// immediately self-execute every proposal, silently defeating the entire
+/// multisig premise. If this constant is ever made configurable, the setter
+/// MUST enforce `assert!(new_threshold >= 2)`.
 const THRESHOLD: u32 = 2;
 const EXPIRY_SECONDS: u64 = 24 * 60 * 60; // 24 hours
 
@@ -104,6 +113,9 @@ impl MultisigAdminContract {
             },
         );
 
+        // A fresh proposal holds only the proposer's approval, so with the
+        // required THRESHOLD >= 2 it cannot auto-execute here. See the
+        // THRESHOLD invariant above.
         Self::maybe_execute(&env, &mut proposal);
         env.storage()
             .persistent()
@@ -145,6 +157,8 @@ impl MultisigAdminContract {
             },
         );
 
+        // Auto-executes only once approvals reach THRESHOLD (>= 2), which
+        // requires at least one distinct approver beyond the proposer.
         Self::maybe_execute(&env, &mut proposal);
         env.storage().persistent().set(&key, &proposal);
     }
@@ -184,6 +198,7 @@ impl MultisigAdminContract {
         if env.ledger().timestamp() > proposal.expires_at {
             panic!("proposal expired");
         }
+        // THRESHOLD must remain >= 2 (see the invariant on the constant).
         if proposal.approvals.len() >= THRESHOLD {
             proposal.executed = true;
             env.events().publish(
