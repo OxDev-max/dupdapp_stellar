@@ -61,6 +61,12 @@ pub struct ProposalExecutedEvent {
     pub operation: String,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProposalPrunedEvent {
+    pub proposal_id: u64,
+}
+
 /// Multisig admin **attestation / signaling** contract.
 ///
 /// IMPORTANT: This contract does NOT execute proposals against any real
@@ -176,6 +182,37 @@ impl MultisigAdminContract {
         // requires at least one distinct approver beyond the proposer.
         Self::maybe_execute(&env, &mut proposal);
         env.storage().persistent().set(&key, &proposal);
+    }
+
+    /// Removes an expired, never-executed proposal from persistent storage.
+    ///
+    /// Permissionless: expiry is objectively checkable on-chain via
+    /// `env.ledger().timestamp() > proposal.expires_at`, matching the check
+    /// used by `approve`/`maybe_execute`. This lets anyone reclaim the rent
+    /// and footprint of proposals that expired without reaching [`THRESHOLD`].
+    ///
+    /// Panics if the proposal does not exist, has already been executed, or
+    /// has not yet expired — so live or executed proposals can never be pruned.
+    pub fn prune_expired_proposal(env: Env, proposal_id: u64) {
+        let key = DataKey::Proposal(proposal_id);
+        let proposal: Proposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("proposal not found");
+
+        if proposal.executed {
+            panic!("proposal already executed");
+        }
+        if env.ledger().timestamp() <= proposal.expires_at {
+            panic!("proposal not expired");
+        }
+
+        env.storage().persistent().remove(&key);
+        env.events().publish(
+            ("MULTISIG", "proposal_pruned"),
+            ProposalPrunedEvent { proposal_id },
+        );
     }
 
     pub fn get_admins(env: Env) -> Vec<Address> {
