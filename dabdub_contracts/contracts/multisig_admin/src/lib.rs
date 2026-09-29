@@ -61,6 +61,21 @@ pub struct ProposalExecutedEvent {
     pub operation: String,
 }
 
+/// Multisig admin **attestation / signaling** contract.
+///
+/// IMPORTANT: This contract does NOT execute proposals against any real
+/// contract state. The `operation` and `args` fields carried by a [`Proposal`]
+/// are opaque, caller-supplied metadata: they are stored and echoed back in
+/// events, but they are NEVER interpreted, decoded, or dispatched as a
+/// cross-contract call anywhere in this contract. Marking a proposal as
+/// `executed` (see [`MultisigAdminContract::maybe_execute`]) only flips a
+/// signaling flag and emits a `proposal_executed` event.
+///
+/// Applying the real effect described by `operation`/`args` is the
+/// responsibility of an external, off-chain relayer that watches for the
+/// `proposal_executed` event and performs the corresponding action itself.
+/// Integrators MUST NOT assume that an `executed` proposal has already changed
+/// any on-chain state.
 #[contract]
 pub struct MultisigAdminContract;
 
@@ -191,6 +206,14 @@ impl MultisigAdminContract {
         Self::contains_address(approvals, caller)
     }
 
+    /// Marks a proposal as executed once it has reached [`THRESHOLD`] approvals.
+    ///
+    /// This is a **signaling-only** operation: it sets `proposal.executed = true`
+    /// and emits a `proposal_executed` event. The proposal's `operation` and
+    /// `args` fields are NOT interpreted or dispatched here — no cross-contract
+    /// call is made and no external state is mutated. An off-chain relayer is
+    /// expected to observe the `proposal_executed` event and apply the real
+    /// effect of `operation`/`args` itself.
     fn maybe_execute(env: &Env, proposal: &mut Proposal) {
         if proposal.executed {
             return;
