@@ -1,7 +1,7 @@
 #![cfg(test)]
 
-use crate::{FeeCalculatorContract, FeeCalculatorContractClient, FeeTier};
-use soroban_sdk::{testutils::{Address as _, Ledger}, vec, Address, Env};
+use crate::{FeeCalculatorContract, FeeCalculatorContractClient, FeeTier, FeeTiersUpdatedEvent};
+use soroban_sdk::{testutils::{Address as _, Events as _, Ledger}, vec, Address, Env, IntoVal};
 
 fn setup_env() -> (
     Env,
@@ -72,7 +72,10 @@ fn test_highest_tier_applies_at_exact_boundary() {
 
 #[test]
 fn test_highest_tier_applies_at_exact_boundary() {
+    let (env, client, _admin, merchant, settlement_caller) = setup_env();
 
+    client.calculate_fee(&settlement_caller, &merchant, &2_000); // puts merchant into 120 bps tier
+    let (_, _, bps_before_reset) = client.calculate_fee(&settlement_caller, &merchant, &1);
     assert_eq!(bps, 100);
 }
 
@@ -91,6 +94,27 @@ fn test_volume_resets_after_30_days_by_ledger_count() {
     let (_, _, bps_after_reset) =
         client.calculate_fee(&settlement_caller, &merchant, &100);
     assert_eq!(bps_after_reset, 150);
+}
+
+#[test]
+fn test_get_merchant_volume_is_read_only_after_window_elapsed() {
+    let (env, client, admin, merchant) = setup_env();
+
+    client.calculate_fee(&admin, &merchant, &2_000);
+    assert_eq!(client.get_merchant_volume(&merchant), 2_000);
+
+    // Move ledger beyond 30-day window (172800 ledgers).
+    env.ledger().with_mut(|li| li.sequence_number += 172_800);
+
+    // The getter must report the windowed (reset) value without persisting it.
+    assert_eq!(client.get_merchant_volume(&merchant), 0);
+    // A second read must observe the same value, proving no write-back occurred.
+    assert_eq!(client.get_merchant_volume(&merchant), 0);
+
+    // The persisted volume is still the pre-reset value; only
+    // update_and_get_volume (via calculate_fee) performs the reset-and-persist.
+    let (_, _, bps) = client.calculate_fee(&admin, &merchant, &100);
+    assert_eq!(bps, 150);
 }
 
 #[test]
@@ -127,6 +151,41 @@ fn test_admin_can_update_fee_tiers() {
 }
 
 #[test]
+fn test_set_fee_tiers_emits_fee_tiers_updated_event() {
+    let (env, client, admin, _merchant) = setup_env();
+
+    let new_tiers = vec![
+        &env,
+        FeeTier {
+            threshold_usdc: 0,
+            fee_bps: 200,
+        },
+        FeeTier {
+            threshold_usdc: 5_000,
+            fee_bps: 80,
+        },
+    ];
+
+    client.set_fee_tiers(&admin, &new_tiers);
+
+    let expected = FeeTiersUpdatedEvent {
+        admin: admin.clone(),
+        tiers: new_tiers.clone(),
+    };
+
+    let events = env.events().all();
+    let last = events.last().unwrap();
+    assert_eq!(
+        last,
+        (
+            client.address.clone(),
+            (soroban_sdk::symbol_short!("fee_tiers"),).into_val(&env),
+            expected.into_val(&env),
+        )
+    );
+}
+
+#[test]
 #[should_panic(expected = "Not admin")]
 fn test_non_admin_cannot_update_fee_tiers() {
     let (env, client, _admin, _merchant, _settlement_caller) = setup_env();
@@ -141,6 +200,41 @@ fn test_non_admin_cannot_update_fee_tiers() {
     ];
 
     client.set_fee_tiers(&random, &new_tiers);
+}
+
+#[test]
+#[should_panic(expected = "Unauthorized caller")]
+fn test_unauthorized_caller_cannot_calculate_fee() {
+    let (env, client, _admin, merchant) = setup_env();
+    let attacker = Address::generate(&env);
+
+    client.calculate_fee(&attacker, &merchant, &1_000);
+}
+
+#[test]
+fn test_admin_can_calculate_fee() {
+    let (_env, client, admin, merchant) = setup_env();
+
+    let (_, _, bps) = client.calculate_fee(&admin, &merchant, &1_000);
+    assert_eq!(bps, 120);
+}
+
+#[test]
+#[should_panic(expected = "Unauthorized caller")]
+fn test_attacker_cannot_grief_merchant_fee_tier() {
+    let (_env, client, admin, merchant) = setup_env();
+    let attacker = Address::generate(&env);
+
+    // Attacker attempts to push the victim merchant's volume past the tier
+    // threshold with no real settlement activity.
+    client.calculate_fee(&attacker, &merchant, &1_000);
+
+    // The victim's tracked volume must be untouched by the rejected call.
+    assert_eq!(client.get_merchant_volume(&merchant), 0);
+
+    // A legitimate admin call still advances volume and applies the tier.
+    let (_, _, bps) = client.calculate_fee(&admin, &merchant, &1_000);
+    assert_eq!(bps, 120);
 }
 
 #[test]
